@@ -1,0 +1,286 @@
+/**************************** USE THIS JAR TO FORMAT JSON AS HIVE TABLES WITH JSON KEYS AS COLUMNS **************************/ 
+add jar /home/cloudera/Downloads/json-serde-1.3.6-SNAPSHOT-jar-with-dependencies.jar
+
+/************************************************************** STATEMENTS TO ENABLE DYNAMIC PARTITIONS OF DATA TABLES AND SET SOME HIVE PARAMETERS **************************/
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=500;
+SET hive.exec.reducers.max=10
+
+/**************************** LOAD DATA TO TABLE ****************************************************************************/
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_meta_TV.strict' OVERWRITE INTO TABLE movieAndTV_meta;
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_reviews_TV.strict' OVERWRITE INTO TABLE movieAndTV_reviews;
+
+/*************************** Queries TO STORE PRODUCT INFORMATION ***********************************************/
+CREATE TABLE movieAndTV_meta(asin string,description string,title string,
+related struct<also_viewed:array<string>,buy_after_viewing:array<string>,also_bought:array<string>,bought_together:array<string>>,
+price double,salesRank map<string,int>,imUrl string,categories array<array<string>>) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+/*************************** TABLE TO STORE Clothing INFORMATION ***********************************************/
+CREATE TABLE clothing_meta (asin string,description string,title string,
+related struct<also_viewed:array<string>,buy_after_viewing:array<string>,also_bought:array<string>,bought_together:array<string>>,
+price double,salesRank map<string,int>,imUrl string,categories array<array<string>>) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_meta_clothing.strict' OVERWRITE INTO TABLE clothing_meta;
+
+CREATE TABLE clothes_by_price ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select a.price_dec,count(a.asin) from 
+(select cast(price as decimal(4,2)) as price_dec,asin from clothing_meta) as a 
+group by a.price_dec order by a.price_dec DESC;
+
+/*************************** TABLE TO STORE Sports INFORMATION ***********************************************/
+CREATE TABLE sports_meta (asin string,description string,title string,
+related struct<also_viewed:array<string>,buy_after_viewing:array<string>,also_bought:array<string>,bought_together:array<string>>,
+price double,salesRank map<string,int>,imUrl string,brand string,categories array<array<string>>) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_meta_sports.strict' OVERWRITE INTO TABLE sports_meta;
+
+CREATE TABLE sports_by_price ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select a.price_dec,count(a.asin) from 
+(select cast(price as decimal(4,2)) as price_dec,asin from sports_meta) as a 
+group by a.price_dec order by a.price_dec DESC;
+
+/*************************** Queries TO STORE MOVIES AND TV REVIEW INFORMATION ***********************************************/
+CREATE TABLE movieAndTV_reviews
+(reviewerid string,asin string,helpful array<int>,
+unixreviewtime bigint,reviewtext string,overall double,
+reviewTime string, summary string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+/*************************************** QUERY USING LATERAL VIEWS ******************************************/
+
+SELECT b.asin, c.also_viewed FROM metaformovies a LATERAL VIEW json_tuple(a.movie_item, 'asin', 'related') b 
+AS asin, related  LATERAL VIEW json_tuple(b.related, 'also_viewed', 'buy_after_viewing','also_bought','bought_together') c 
+AS also_viewed,buy_after_viewing,also_bought,bought_together WHERE b.asin='0000143561';
+
+/*************************** TABLE TO STORE DATA PARTITIONED BY YEAR ***********************************************/
+CREATE TABLE moviesandtv_by_year
+(reviewerid string,asin string,helpful array<int>,
+reviewtext string,overall double,
+reviewTime string, summary string) 
+partitioned by (time_year string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+CREATE TABLE sports_by_year
+(reviewerid string,asin string,helpful array<int>,
+reviewtext string,overall double,
+reviewTime string, summary string) 
+partitioned by (time_year string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+/*************************** LOAD DATA INTO PARTITIONED TABLE ***********************************************/
+From movieAndTV_reviews mr
+insert overwrite table moviesandtv_by_year partition (time_year) 
+select mr.reviewerid,mr.helpful, mr.reviewtext, mr.overall, mr.reviewtime, mr.summary,year(from_unixtime(mr.unixreviewtime,'yyyy-MM-dd')) as time_year;
+
+From sports_reviews mr
+insert overwrite table sports_by_year partition (time_year) 
+select mr.reviewerid, mr.asin, mr.helpful, mr.reviewtext, mr.overall, mr.reviewtime, mr.summary,year(from_unixtime(mr.unixreviewtime,'yyyy-MM-dd')) as time_year;
+
+/*************************** TABLE TO STORE DATA PARTITIONED BY YEAR AND PRODUCT ***********************************************/
+CREATE TABLE moviesandtv_yearandproduct
+(reviewerid string,helpful array<int>,
+reviewtext string,overall double,
+reviewTime string, summary string) 
+partitioned by (time_year string, asin string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+/*************************** LOAD DATA INTO ABOVE TABLE PARTITIONED BY YEAR AND PRODUCT ***********************************************/
+From moviesAndTV_by_year mr
+insert overwrite table moviesandtv_yearandproduct partition (time_year,asin) 
+select mr.reviewerid,mr.helpful, mr.reviewtext, mr.overall, mr.reviewtime, mr.summary,mr.time_year as time_year, mr.asin as asin where mr.time_year='2014';
+
+/************************** MAKE TABLES IN THE FORM USERID,ITEMID,RATING FOR EACH YEAR FROM 2000 TO 2014 AS A POTENTIAL INPUT TO MAHOUT / ITEM RECOMMENDER ********************/
+
+CREATE TABLE user_item_rating_2014 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2014' sort by asin;
+
+CREATE TABLE user_item_rating_2013 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2013' sort by asin;
+
+CREATE TABLE user_item_rating_2012 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2012' sort by asin;
+
+CREATE TABLE user_item_rating_2011 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2011' sort by asin;
+
+CREATE TABLE user_item_rating_2010 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2010' sort by asin;
+
+CREATE TABLE user_item_rating_2009 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2009' sort by asin;
+
+CREATE TABLE user_item_rating_2008 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2008' sort by asin;
+
+CREATE TABLE user_item_rating_2007 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2007' sort by asin;
+
+CREATE TABLE user_item_rating_2006 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2006' sort by asin;
+
+CREATE TABLE user_item_rating_2005 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2005' sort by asin;
+
+CREATE TABLE user_item_rating_2004 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2004' sort by asin;
+
+CREATE TABLE user_item_rating_2003 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2003' sort by asin;
+
+CREATE TABLE user_item_rating_2002 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2002' sort by asin;
+
+CREATE TABLE user_item_rating_2001 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2001' sort by asin;
+
+CREATE TABLE user_item_rating_2000 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid, asin,overall from moviesandtv_by_year where time_year='2000' sort by asin;
+
+
+/************************************************************** HOW MANY ITEMS HAVE BEEN REVIEWED BY EACH REVIEWER PER YEAR **************************/
+CREATE TABLE reviewersAndItems_by_year ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select reviewerid,time_year,count(asin) from moviesandtv_by_year group by time_year,reviewerid;
+
+/************************************************** HOW MANY ITEMS HAVE BEEN GRADED IN EACH OF THE RANKING CATEGORIES **************************/
+CREATE TABLE items_foreachoverallrating ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as select overall,count(asin) from moviesandtv_by_year group by overall order by overall desc;
+
+
+/************************************************** ITEMS THAT HAVE BEEN RATED HIGHLY IN EACH CATEGORY BY MORE THAN ONE REVIEWER PER YEAR **************************/
+CREATE TABLE items_ratedhighly_bymany ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile
+as SELECT time_year,asin,count(reviewerid) from moviesandtv_by_year where overall=5.0 group by time_year,asin having count(reviewerid)>1;
+
+/************************************************** ITEMS BOUGHT TOGETHER WITH A PARTICULAR PRODUCT **************************/
+CREATE TABLE movie_items_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.bought_together as bought_together from movieandtv_meta where related.bought_together is not NULL;
+
+CREATE TABLE book_items_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.bought_together as bought_together from books_meta where related.bought_together is not NULL;
+
+CREATE TABLE cloth_items_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.bought_together as bought_together from clothing_meta where related.bought_together is not NULL;
+
+CREATE TABLE sport_items_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.bought_together as bought_together from sports_meta where related.bought_together is not NULL;
+
+/************************************************** ITEMS VIEWED WITH A PARTICULAR PRODUCT **************************/
+CREATE TABLE movie_items_viewed_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_viewed as also_viewed from movieandtv_json where related.also_viewed is not NULL;
+
+CREATE TABLE book_items_viewed_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_viewed as also_viewed from books_meta where related.also_viewed is not NULL;
+
+CREATE TABLE cloth_items_viewed_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_viewed as also_viewed from clothing_meta where related.also_viewed is not NULL;
+
+CREATE TABLE sport_items_viewed_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_viewed as also_viewed from sports_meta where related.also_viewed is not NULL;
+
+/************************************************** ITEMS ALSO BOUGHT WITH A PARTICULAR PRODUCT **************************/
+CREATE TABLE movie_items_also_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_bought as also_bought from movieandtv_json where related.also_bought is not NULL;
+
+CREATE TABLE book_items_also_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_bought as also_bought from books_meta where related.also_bought is not NULL;
+
+CREATE TABLE cloth_items_also_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_bought as also_bought from clothing_meta where related.also_bought is not NULL;
+
+CREATE TABLE sports_items_also_bought_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.also_bought as also_bought from sports_meta where related.also_bought is not NULL;
+
+/************************************************** ITEMS VEIWED AND BOUGHT WITH A PARTICULAR PRODUCT **************************/
+CREATE TABLE movie_items_viewand_buy_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.buy_after_viewing as buy_after_viewing from movieandtv_json where related.buy_after_viewing is not NULL;
+
+CREATE TABLE book_items_viewand_buy_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.buy_after_viewing as buy_after_viewing from books_meta where related.buy_after_viewing is not NULL;
+
+CREATE TABLE cloth_items_viewand_buy_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.buy_after_viewing as buy_after_viewing from clothing_meta where related.buy_after_viewing is not NULL;
+
+CREATE TABLE sports_items_viewand_buy_with_me ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select asin, related.buy_after_viewing as buy_after_viewing from sports_meta where related.buy_after_viewing is not NULL;
+
+
+/************************************************** CATEGORIZE PRODUCTS ACCORDING TO PRICE RANGE **************************/
+CREATE TABLE movies_by_price ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select a.price_dec,count(a.asin) from 
+(select cast(price as decimal(4,2)) as price_dec,asin from movieandtv_json) as a 
+group by a.price_dec order by a.price_dec DESC;
+
+/*************************** TABLE TO STORE Book INFORMATION ***********************************************/
+CREATE TABLE books_meta (asin string,description string,title string,
+related struct<also_viewed:array<string>,buy_after_viewing:array<string>,also_bought:array<string>,bought_together:array<string>>,
+price double,salesRank map<string,int>,imUrl string,categories array<array<string>>) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_meta_books.strict' OVERWRITE INTO TABLE books_meta;
+
+CREATE TABLE books_by_price ROW FORMAT DELIMITED FIELDS TERMINATED BY "," stored as textfile as 
+select a.price_dec,count(a.asin) from 
+(select cast(price as decimal(4,2)) as price_dec,asin from books_meta) as a 
+group by a.price_dec order by a.price_dec DESC;
+
+/*************************** TABLE TO STORE MOVIES AND TV REVIEW INFORMATION ***********************************************/
+CREATE TABLE books_reviews
+(reviewerid string,asin string,reviewerName string,helpful array<int>,
+unixreviewtime bigint,reviewtext string,overall double,
+reviewTime string, summary string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+CREATE TABLE clothes_reviews
+(reviewerid string,asin string,reviewerName string,helpful array<int>,
+unixreviewtime bigint,reviewtext string,overall double,
+reviewTime string, summary string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+CREATE EXTERNAL TABLE sports_reviews_new
+(reviewerid string,asin string,reviewerName string,helpful array<int>,
+unixreviewtime bigint,reviewtext string,overall double,
+reviewTime string, summary string) 
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe';
+
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_review_clothes.strict' OVERWRITE INTO TABLE clothes_reviews;
+LOAD DATA LOCAL INPATH '/home/cloudera/Project/output_reviews_sports.strict' OVERWRITE INTO TABLE sports_reviews_new;
+
+
+/******************************* YEAR, REVIEWER ID AND  HELPFULLNESS RATIO **************************************************************/
+select time_year,reviewerid, cast((helpful[0]/helpful[1]) as double) as helpful_ratio from sports_by_year where time_year='2014' group by time_year, reviewerid,cast((helpful[0]/helpful[1]) as double) order by time_year; 
+
+/***************************************** GET THE REVIEWERS, PRODUCTS, BRANDS THAT HAVE BEEN PURCHASED PER YEAR ********************************/
+select y.time_year, y.reviewerid, m.asin, m.brand from sports_by_year y join sports_meta m on y.asin=m.asin
+group by y.time_year,m.brand,y.reviewerid, m.asin order by y.time_year,m.brand;
+
+/**************************************** SELECT THE PRICE AND OVERALL RANKING OF THE PRODUCT BY YEAR *********************************/
+select y.time_year, m.asin, m.price, y.overall from sports_by_year y join sports_meta m on y.asin=m.asin
+group by time_year, m.asin, m.price, y.overall 
+order by y.time_year, m.price, y.overall;
+
+/************************* AVERAGE RATING OF ALL PRODUCTS *************************************/
+select m.asin, cast(avg(r.overall) as decimal(4,3)) from sports_meta m join sports_reviews r on m.asin=r.asin group by m.asin; 
+
+/************** DISPLAY SALES RANK FOR CATEGORIES ***********************/
+select asin,
+a.category, a.rank from
+sports_meta lateral view explode(salesrank) a as category,rank
+sort by a.category,a.rank;
